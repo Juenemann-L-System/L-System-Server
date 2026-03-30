@@ -153,7 +153,7 @@ export SPRING_DATASOURCE_PASSWORD=${THINGSBOARD_PASS}
 export SQL_POSTGRES_TS_KV_PARTITIONING=MONTHS
 
 # WICHTIG: Bindung an localhost -> unabhängig von Netzwerkinterfaces!
-export HTTP_BIND_ADDRESS=127.0.0.1
+export HTTP_BIND_ADDRESS=0.0.0.0
 export MQTT_BIND_ADDRESS=127.0.0.1
 
 # Server Port Configuration
