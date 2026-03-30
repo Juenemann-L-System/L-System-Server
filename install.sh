@@ -1,15 +1,21 @@
 #!/bin/bash
 set -e
 
-# ===============================
-# ThingsBoard Installation Script
-# ===============================
+# ==========================================================
+# Thingsboard + L-System Server Installation Script
+# ==========================================================
+# Features:
+# - Vollständig automatisiert
+# - Setzt Netzwerk-Bind-Adressen automatisch
+# - Integrierte Rollback-Funktion
+# - Einfache Wiederverwendbarkeit für künftige Systeme
+# ==========================================================
 
 # Global variables for credentials
 THINGSBOARD_USER=""
 THINGSBOARD_PASS=""
 
-# Prompt user if a step fails
+# Function: prompt the user if a step fails.
 prompt_continue() {
     echo "An error occurred in the previous step."
     while true; do
@@ -29,17 +35,21 @@ prompt_continue() {
     done
 }
 
-# Rollback function
+# Function: rollback previous steps
 rollback_installation() {
     echo "Rolling back installation steps..."
     sudo service thingsboard stop 2>/dev/null
+
     if [ -f /usr/share/thingsboard/conf/thingsboard.conf.bak ]; then
         sudo mv /usr/share/thingsboard/conf/thingsboard.conf.bak /usr/share/thingsboard/conf/thingsboard.conf
         echo "Restored original Thingsboard configuration."
     fi
-    sudo -u postgres psql -c "DROP DATABASE IF EXISTS thingsboard;"
+
+    sudo -u postgres psql -c "DROP DATABASE IF EXISTS thingsboard;" 
     sudo -u postgres psql -c "DROP ROLE IF EXISTS ${THINGSBOARD_USER};"
+
     sudo dpkg -r thingsboard 2>/dev/null
+
     echo "Rollback completed."
 }
 
@@ -49,50 +59,48 @@ read -p "Enter Thingsboard username: " THINGSBOARD_USER
 read -s -p "Enter Thingsboard password: " THINGSBOARD_PASS
 echo ""
 
-# Step 1: Install Java
+# Step 1: Install openjdk-17-jdk if needed
 echo "Step 1: Installing openjdk-17-jdk."
 sudo apt update
 if ! dpkg -s openjdk-17-jdk &>/dev/null; then
-    sudo apt install -y openjdk-17-jdk
-    [ $? -ne 0 ] && prompt_continue
+    sudo apt install -y openjdk-17-jdk || prompt_continue
 else
-    echo "Java already installed: $(java -version 2>&1 | head -n1)"
+    JAVA_VERSION=$(java -version 2>&1 | head -n 1)
+    echo "Java already installed: $JAVA_VERSION"
+    if [[ "$JAVA_VERSION" != *"17"* ]]; then
+         read -p "Detected Java version is not 17. Install openjdk-17-jdk? (y/n): " replace_choice
+         if [[ "$replace_choice" =~ ^[Yy]$ ]]; then
+             sudo apt install -y openjdk-17-jdk || prompt_continue
+         else
+             echo "Continuing with existing Java version."
+         fi
+    fi
 fi
 
 # Step 2: Configure java alternatives
 echo "Step 2: Configuring Java alternatives."
 sudo update-alternatives --config java || prompt_continue
 
-# Step 3: Install Thingsboard
+# Step 3: Install Thingsboard package
 echo "Step 3: Installing Thingsboard Service."
 TB_VERSION="4.3.0.1"
-wget https://github.com/thingsboard/thingsboard/releases/download/v${TB_VERSION}/thingsboard-${TB_VERSION}.deb
+wget https://github.com/thingsboard/thingsboard/releases/download/v${TB_VERSION}/thingsboard-${TB_VERSION}.deb || prompt_continue
 sudo dpkg -i thingsboard-${TB_VERSION}.deb || prompt_continue
-echo "Thingsboard package installed successfully."
 
 # Step 4: Configure Thingsboard Database
 echo "Step 4: Configuring Thingsboard Database."
-sudo -u postgres psql <<EOF
-DO \$\$
-BEGIN
-   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${THINGSBOARD_USER}') THEN
-       CREATE ROLE ${THINGSBOARD_USER} WITH LOGIN PASSWORD '${THINGSBOARD_PASS}';
-   END IF;
-END
-\$\$;
-
-CREATE DATABASE IF NOT EXISTS thingsboard WITH OWNER ${THINGSBOARD_USER};
+sudo -u postgres psql <<EOF || prompt_continue
+CREATE ROLE ${THINGSBOARD_USER} WITH LOGIN PASSWORD '${THINGSBOARD_PASS}';
+CREATE DATABASE thingsboard WITH OWNER ${THINGSBOARD_USER};
 EOF
-echo "Database and role configured."
 
-# Step 5: Update Thingsboard configuration
+# Step 5: Update Thingsboard configuration file
 echo "Step 5: Updating Thingsboard configuration."
 CONFIG_FILE="/usr/share/thingsboard/conf/thingsboard.conf"
-[ -f "$CONFIG_FILE" ] && sudo cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
-
-# Ensure shell variables exist
-: "${HTTP_BIND_ADDRESS:=0.0.0.0}"
-: "${MQTT_BIND_ADDRESS:=127.0.0.1}"
+if [ -f "$CONFIG_FILE" ]; then
+    sudo cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+    echo "Backup saved as ${CONFIG_FILE}.bak."
+fi
 
 sudo bash -c "cat >> $CONFIG_FILE" <<EOL
 
@@ -103,16 +111,14 @@ export SPRING_DATASOURCE_USERNAME=${THINGSBOARD_USER}
 export SPRING_DATASOURCE_PASSWORD=${THINGSBOARD_PASS}
 export SQL_POSTGRES_TS_KV_PARTITIONING=MONTHS
 
-# Bind addresses from shell variables
-export HTTP_BIND_ADDRESS=${HTTP_BIND_ADDRESS}
-export MQTT_BIND_ADDRESS=${MQTT_BIND_ADDRESS}
+# NETWORK CONFIGURATION FOR ALL INSTALLATIONS
+export HTTP_BIND_ADDRESS=0.0.0.0
+export MQTT_BIND_ADDRESS=127.0.0.1
 
-# Server ports
+# Server Port Configuration
 export HTTP_BIND_PORT=9090
 export MQTT_BIND_PORT=1882
 EOL
-
-echo "Configuration file updated successfully."
 
 # Step 6: Run Thingsboard installation script
 echo "Step 6: Running Thingsboard installation script."
@@ -121,7 +127,6 @@ sudo ./install.sh || prompt_continue
 
 # Step 7: Start Thingsboard service
 echo "Step 7: Starting Thingsboard Service."
-sudo systemctl daemon-reload
 sudo service thingsboard start || prompt_continue
 
 echo "Installation completed successfully!"
