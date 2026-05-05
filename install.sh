@@ -165,8 +165,8 @@ fi
 
 # Step 6: Run Thingsboard installation script
 echo "Step 6: Running Thingsboard installation script."
-cd /usr/share/thingsboard/bin/install/
-sudo ./install.sh
+cd /usr/share/thingsboard
+sudo /usr/share/thingsboard/bin/install/install.sh
 if [ $? -ne 0 ]; then
     prompt_continue
 else
