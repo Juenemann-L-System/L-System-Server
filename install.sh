@@ -34,27 +34,22 @@ prompt_continue() {
 # Function: rollback previous steps (this is a basic implementation)
 rollback_installation() {
     echo "Rolling back installation steps..."
-    # Step 7: Stop Thingsboard service if running
-    sudo service thingsboard stop 2>/dev/null
 
-    # Step 5: Restore Thingsboard configuration if a backup exists.
+    # Stop Thingsboard service if running
+    sudo systemctl stop thingsboard 2>/dev/null || true
+
+    # Restore Thingsboard configuration if a backup exists.
     if [ -f /etc/thingsboard/conf/thingsboard.conf.bak ]; then
         sudo mv /etc/thingsboard/conf/thingsboard.conf.bak /etc/thingsboard/conf/thingsboard.conf
         echo "Restored original Thingsboard configuration."
     fi
 
-    # Step 4: Drop Thingsboard database and role.
-    sudo -u postgres psql -c "DROP DATABASE IF EXISTS thingsboard;" 
+    # Drop Thingsboard database and role.
+    sudo -u postgres psql -c "DROP DATABASE IF EXISTS thingsboard;"
     sudo -u postgres psql -c "DROP ROLE IF EXISTS ${THINGSBOARD_USER};"
 
-    # Step 3: Remove Thingsboard package.
-    sudo dpkg -r thingsboard 2>/dev/null
-
-    # Note: Removing openjdk-17 might affect other applications. Use with caution.
-    # Uncomment the following lines if you are sure you want to remove it.
-    # if dpkg -s openjdk-17-jdk &>/dev/null; then
-    #     sudo apt remove -y openjdk-17-jdk
-    # fi
+    # Remove Thingsboard package.
+    sudo dpkg -r thingsboard 2>/dev/null || true
 
     echo "Rollback completed."
 }
@@ -65,9 +60,19 @@ read -p "Enter Thingsboard username: " THINGSBOARD_USER
 read -s -p "Enter Thingsboard password: " THINGSBOARD_PASS
 echo ""
 
-# Step 1: Install openjdk-17-jdk if needed
-echo "Step 1: Installing openjdk-17-jdk."
+# Step 1: Install dependencies
+echo "Step 1: Installing required packages."
+
 sudo apt update
+
+sudo apt install -y curl wget
+if [ $? -ne 0 ]; then
+    prompt_continue
+fi
+
+# Step 2: Install openjdk-17-jdk if needed
+echo "Step 2: Installing openjdk-17-jdk."
+
 if ! dpkg -s openjdk-17-jdk &>/dev/null; then
     sudo apt install -y openjdk-17-jdk
     if [ $? -ne 0 ]; then
@@ -76,55 +81,76 @@ if ! dpkg -s openjdk-17-jdk &>/dev/null; then
         echo "openjdk-17-jdk installed successfully."
     fi
 else
-    # Check the installed Java version.
     JAVA_VERSION=$(java -version 2>&1 | head -n 1)
     echo "Java already installed: $JAVA_VERSION"
+
     if [[ "$JAVA_VERSION" != *"17"* ]]; then
-         read -p "Detected Java version is not 17. Do you want to install openjdk-17-jdk and replace it? (y/n): " replace_choice
-         if [[ "$replace_choice" =~ ^[Yy]$ ]]; then
-             sudo apt install -y openjdk-17-jdk
-             if [ $? -ne 0 ]; then
-                 prompt_continue
-             fi
-         else
-             echo "Continuing with the existing Java version."
-         fi
+        read -p "Detected Java version is not 17. Install openjdk-17-jdk? (y/n): " replace_choice
+
+        if [[ "$replace_choice" =~ ^[Yy]$ ]]; then
+            sudo apt install -y openjdk-17-jdk
+
+            if [ $? -ne 0 ]; then
+                prompt_continue
+            fi
+        else
+            echo "Continuing with the existing Java version."
+        fi
     fi
 fi
 
-# Step 2: Configure java alternatives
-echo "Step 2: Configuring Java alternatives."
+# Step 3: Configure java alternatives
+echo "Step 3: Configuring Java alternatives."
+
 sudo update-alternatives --config java
+
 if [ $? -ne 0 ]; then
     prompt_continue
 else
     echo "Java alternatives configured."
 fi
 
-# Step 3: Install Thingsboard package
-echo "Step 3: Installing Thingsboard Service."
-TB_VERSION="4.3.0.1"
+# Step 4: Fetch latest ThingsBoard version
+echo "Step 4: Fetching latest ThingsBoard version."
 
-wget https://github.com/thingsboard/thingsboard/releases/download/v${TB_VERSION}/thingsboard-${TB_VERSION}.deb
+LATEST_VERSION=$(curl -s https://api.github.com/repos/thingsboard/thingsboard/releases/latest | grep '"tag_name"' | cut -d '"' -f4 | sed 's/v//')
 
+if [ -z "$LATEST_VERSION" ]; then
+    echo "Could not fetch latest ThingsBoard version."
+    exit 1
+fi
+
+echo "Latest ThingsBoard version detected: $LATEST_VERSION"
+
+# Step 5: Download latest ThingsBoard package
+echo "Step 5: Downloading latest ThingsBoard package."
+
+wget https://github.com/thingsboard/thingsboard/releases/download/v${LATEST_VERSION}/thingsboard-${LATEST_VERSION}.deb
 
 if [ $? -ne 0 ]; then
     prompt_continue
 fi
 
-sudo dpkg -i thingsboard-${TB_VERSION}.deb
+# Step 6: Install ThingsBoard package
+echo "Step 6: Installing ThingsBoard package."
+
+sudo dpkg -i thingsboard-${LATEST_VERSION}.deb
+
 if [ $? -ne 0 ]; then
     prompt_continue
 else
-    echo "Thingsboard package installed successfully."
+    echo "ThingsBoard package installed successfully."
 fi
 
-# Step 4: Configure Thingsboard Database
-echo "Step 4: Configuring Thingsboard Database."
+sudo systemctl daemon-reload
+
+# Step 7: Configure PostgreSQL database
+echo "Step 7: Configuring PostgreSQL database."
+
+sudo systemctl start postgresql
+
 sudo -u postgres psql <<EOF
--- Create role for Thingsboard authentication
 CREATE ROLE ${THINGSBOARD_USER} WITH LOGIN PASSWORD '${THINGSBOARD_PASS}';
--- Create Thingsboard database
 CREATE DATABASE thingsboard WITH OWNER ${THINGSBOARD_USER};
 EOF
 
@@ -134,18 +160,19 @@ else
     echo "Database and role created successfully."
 fi
 
-# Step 5: Update Thingsboard configuration file
-echo "Step 5: Updating Thingsboard configuration."
-CONFIG_FILE="/usr/share/thingsboard/conf/thingsboard.conf"
+# Step 8: Update ThingsBoard configuration
+echo "Step 8: Updating ThingsBoard configuration."
+
+CONFIG_FILE="/etc/thingsboard/conf/thingsboard.conf"
+
 if [ -f "$CONFIG_FILE" ]; then
-    # Backup original configuration
     sudo cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
     echo "Backup of configuration file saved as ${CONFIG_FILE}.bak."
 fi
 
 sudo bash -c "cat >> $CONFIG_FILE" <<EOL
 
-# DB Configuration 
+# DB Configuration
 export DATABASE_TS_TYPE=sql
 export SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/thingsboard
 export SPRING_DATASOURCE_USERNAME=${THINGSBOARD_USER}
@@ -163,23 +190,36 @@ else
     echo "Configuration file updated successfully."
 fi
 
-# Step 6: Run Thingsboard installation script
-echo "Step 6: Running Thingsboard installation script."
-cd /usr/share/thingsboard
-sudo /usr/share/thingsboard/bin/install/install.sh
+# Step 9: Run ThingsBoard installation script
+echo "Step 9: Running ThingsBoard installation script."
+
+cd /usr/share/thingsboard/bin/install/
+
+sudo ./install.sh
+
 if [ $? -ne 0 ]; then
     prompt_continue
 else
     echo "Installation script executed successfully."
 fi
 
-# Step 7: Start Thingsboard service
-echo "Step 7: Starting Thingsboard Service."
-sudo service thingsboard start
+# Step 10: Start ThingsBoard service
+echo "Step 10: Starting ThingsBoard service."
+
+sudo systemctl enable thingsboard
+sudo systemctl restart thingsboard
+
 if [ $? -ne 0 ]; then
     prompt_continue
 else
-    echo "Thingsboard service started successfully."
+    echo "ThingsBoard service started successfully."
 fi
 
+# Step 11: Show service status
+echo "Step 11: Checking service status."
+
+sudo systemctl status thingsboard --no-pager
+
+echo ""
 echo "Installation completed successfully!"
+echo "Installed ThingsBoard version: $LATEST_VERSION"
