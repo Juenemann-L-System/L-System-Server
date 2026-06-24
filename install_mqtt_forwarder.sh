@@ -15,7 +15,7 @@ DEFAULT_MQTT_IP="192.168.2.10"
 DEFAULT_MQTT_PORT="1883"
 
 # ----------------------------
-# INPUT
+# INPUT (mit Defaults)
 # ----------------------------
 read -p "Gateway IP [$DEFAULT_GW_IP]: " GW_IP
 GW_IP=${GW_IP:-$DEFAULT_GW_IP}
@@ -62,14 +62,14 @@ echo "$GW_PASS" | sudo -S opkg install /tmp/$PKG || true
 CONF="/var/config/chirpstack-mqtt-forwarder/ap1/chirpstack-mqtt-forwarder.toml"
 
 if [ -f "\$CONF" ]; then
-    echo "Configuring MQTT..."
+    echo "Updating MQTT config..."
     echo "$GW_PASS" | sudo -S sed -i "s#^server=.*#server=\"tcp://$MQTT_IP:$MQTT_PORT\"#g" "\$CONF"
 else
     echo "ERROR: Config file not found!"
     exit 1
 fi
 
-echo "Restarting forwarder..."
+echo "Restarting service..."
 echo "$GW_PASS" | sudo -S /etc/init.d/chirpstack-mqtt-forwarder-ap1 restart || true
 
 echo "DONE"
