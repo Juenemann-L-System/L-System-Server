@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 ########################################
@@ -8,17 +7,23 @@ set -euo pipefail
 
 read -rp "Gateway IP Address: " GW_IP
 read -rp "Gateway USER: " GW_USER
-read -rsp "Gateway Password (sudo on gateway): " GW_PASS
+read -rsp "Gateway Password: " GW_PASS
 echo ""
 
 read -rp "MQTT Server IP: " MQTT_IP
 read -rp "MQTT Server Port (1883): " MQTT_PORT
-
 echo ""
+
 echo "Install (i) or Update config only (u):"
 read -rp "> " MODE
 
-SSH_OPTS="-o StrictHostKeyChecking=no"
+if [[ "$MODE" != "i" && "$MODE" != "u" ]]; then
+  echo "Invalid option"
+  exit 1
+fi
+
+IPK_FILE="chirpstack-mqtt-forwarder.ipk"
+IPK_URL="https://artifacts.chirpstack.io/downloads/chirpstack-mqtt-forwarder/vendor/multitech/conduit_ap3/chirpstack-mqtt-forwarder_4.3.1-r1_mtcap3.ipk"
 
 ########################################
 # CHECK SSH
@@ -26,97 +31,64 @@ SSH_OPTS="-o StrictHostKeyChecking=no"
 
 echo "[INFO] Checking gateway SSH..."
 
-ssh ${SSH_OPTS} ${GW_USER}@${GW_IP} "echo ok" >/dev/null 2>&1 || {
-    echo "[ERROR] Gateway not reachable"
-    exit 1
-}
+sshpass -p "$GW_PASS" ssh -o StrictHostKeyChecking=no -tt "$GW_USER@$GW_IP" "echo ok" >/dev/null
 
 echo "[OK] Gateway reachable"
 
 ########################################
-# FORCE CORRECT DEVICE TYPE
-########################################
-
-echo "[INFO] Detecting gateway hardware..."
-
-GW_TYPE=$(ssh ${SSH_OPTS} ${GW_USER}@${GW_IP} '
-if [ -f /var/config/device ]; then
-    cat /var/config/device
-elif grep -qi mtcap /proc/cpuinfo 2>/dev/null; then
-    echo mtcap
-else
-    echo mtcap
-fi
-')
-
-echo "[INFO] Detected: $GW_TYPE"
-
-# HARD FIX (because Multitech feeds are inconsistent)
-GW_TYPE="mtcap"
-
-########################################
-# SELECT CORRECT PACKAGE
-########################################
-
-echo "[INFO] Selecting IPK..."
-
-PKG_URL="https://artifacts.chirpstack.io/downloads/chirpstack-mqtt-forwarder/vendor/multitech/mtcap/chirpstack-mqtt-forwarder_4.3.1-r1_mtcap.ipk"
-
-TMP_IPK="/tmp/chirpstack-mqtt-forwarder.ipk"
-
-########################################
-# DOWNLOAD ON SERVER
-########################################
-
-echo "[INFO] Downloading IPK..."
-
-wget -qO "$TMP_IPK" "$PKG_URL"
-
-echo "[OK] Download complete"
-
-########################################
-# COPY TO GATEWAY
-########################################
-
-echo "[INFO] Copying to gateway..."
-
-scp ${SSH_OPTS} "$TMP_IPK" ${GW_USER}@${GW_IP}:/tmp/
-
-########################################
-# EXECUTE ON GATEWAY
+# INSTALL MODE
 ########################################
 
 if [[ "$MODE" == "i" ]]; then
-    ACTION="install"
-else
-    ACTION="update"
-fi
+  echo "[INFO] Downloading package..."
 
-echo "[INFO] Running $ACTION on gateway..."
+  curl -L "$IPK_URL" -o "$IPK_FILE"
 
-ssh ${SSH_OPTS} ${GW_USER}@${GW_IP} bash -s <<EOF
-set -e
+  echo "[INFO] Uploading package to gateway..."
 
-IPK="/tmp/$(basename "$TMP_IPK")"
+  sshpass -p "$GW_PASS" scp -o StrictHostKeyChecking=no "$IPK_FILE" "$GW_USER@$GW_IP:/tmp/"
 
+  echo "[INFO] Installing on gateway..."
+
+  sshpass -p "$GW_PASS" ssh -tt "$GW_USER@$GW_IP" bash -s <<EOF
+
+echo "$GW_PASS" | sudo -S sh -c '
 echo "[GATEWAY] Installing package..."
+opkg install /tmp/$IPK_FILE || true
 
-echo "$GW_PASS" | sudo -S opkg install \$IPK || true
-
-echo "[GATEWAY] Configuring MQTT..."
-
-CFG="/var/config/chirpstack-mqtt-forwarder/ap1/chirpstack-mqtt-forwarder.toml"
+echo "[GATEWAY] Updating MQTT config..."
+CFG="/var/config/chirpstack-mqtt-forwarder/chirpstack-mqtt-forwarder.toml"
 
 if [ -f "\$CFG" ]; then
-    sed -i "s#server=\"tcp://.*\"#server=\"tcp://${MQTT_IP}:${MQTT_PORT}\"#" "\$CFG"
+  sed -i "s#server=.*#server=\"tcp://$MQTT_IP:$MQTT_PORT\"#" "\$CFG"
 fi
 
-echo "[GATEWAY] Restarting service..."
-
-echo "$GW_PASS" | sudo -S monit restart chirpstack-mqtt-forwarder-ap1 2>/dev/null || \
-echo "$GW_PASS" | sudo -S /etc/init.d/chirpstack-mqtt-forwarder-ap1 restart 2>/dev/null || true
-
-echo "[GATEWAY] Done."
+echo "[GATEWAY] Restarting services..."
+/etc/init.d/lora-network-server restart || true
+/etc/init.d/chirpstack-mqtt-forwarder-ap1 restart || true
+'
 EOF
 
-echo "[OK] Completed successfully"
+########################################
+# UPDATE MODE
+########################################
+
+else
+  echo "[INFO] Updating config only..."
+
+  sshpass -p "$GW_PASS" ssh -tt "$GW_USER@$GW_IP" bash -s <<EOF
+
+echo "$GW_PASS" | sudo -S sh -c '
+CFG="/var/config/chirpstack-mqtt-forwarder/chirpstack-mqtt-forwarder.toml"
+
+if [ -f "\$CFG" ]; then
+  sed -i "s#server=.*#server=\"tcp://$MQTT_IP:$MQTT_PORT\"#" "\$CFG"
+fi
+
+/etc/init.d/chirpstack-mqtt-forwarder-ap1 restart || true
+'
+EOF
+
+fi
+
+echo "[OK] Completed"
