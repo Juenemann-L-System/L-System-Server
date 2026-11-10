@@ -70,55 +70,31 @@ if [ $? -ne 0 ]; then
     prompt_continue
 fi
 
-# Step 2: Install openjdk-17-jdk if needed
-echo "Step 2: Installing openjdk-17-jdk."
+# Step 2: Ensure Java 25 is installed
+echo "Step 2: Checking Java 25."
 
-if ! dpkg -s openjdk-17-jdk &>/dev/null; then
-    sudo apt install -y openjdk-17-jdk
-    if [ $? -ne 0 ]; then
-        prompt_continue
-    else
-        echo "openjdk-17-jdk installed successfully."
-    fi
-else
-    JAVA_VERSION=$(java -version 2>&1 | head -n 1)
-    echo "Java already installed: $JAVA_VERSION"
-
-    if [[ "$JAVA_VERSION" != *"17"* ]]; then
-        read -p "Detected Java version is not 17. Install openjdk-17-jdk? (y/n): " replace_choice
-
-        if [[ "$replace_choice" =~ ^[Yy]$ ]]; then
-            sudo apt install -y openjdk-17-jdk
-
-            if [ $? -ne 0 ]; then
-                prompt_continue
-            fi
-        else
-            echo "Continuing with the existing Java version."
-        fi
-    fi
+if ! dpkg -s openjdk-25-jdk-headless &>/dev/null; then
+    sudo apt install -y openjdk-25-jdk-headless
 fi
 
-# Step 3: Configure java alternatives
-echo "Step 3: Configuring Java alternatives."
+JAVA_VERSION=$(java -version 2>&1 | head -n 1)
+echo "Detected Java: $JAVA_VERSION"
 
-sudo update-alternatives --config java
+if [[ "$JAVA_VERSION" != *"25"* ]]; then
+    echo "Java 25 is required. Configuring Java 25."
 
-if [ $? -ne 0 ]; then
-    prompt_continue
-else
-    echo "Java alternatives configured."
+    sudo update-alternatives --set java \
+        /usr/lib/jvm/java-25-openjdk-amd64/bin/java
 fi
 
-# Step 4: Fetch latest ThingsBoard version
-echo "Step 4: Fetching latest ThingsBoard version."
+JAVA_VERSION=$(java -version 2>&1 | head -n 1)
 
-LATEST_VERSION=$(curl -s https://api.github.com/repos/thingsboard/thingsboard/releases/latest | grep '"tag_name"' | cut -d '"' -f4 | sed 's/v//')
-
-if [ -z "$LATEST_VERSION" ]; then
-    echo "Could not fetch latest ThingsBoard version."
+if [[ "$JAVA_VERSION" != *"25"* ]]; then
+    echo "ERROR: Java 25 is not active."
     exit 1
 fi
+
+echo "Java 25 is active."
 
 echo "Latest ThingsBoard version detected: $LATEST_VERSION"
 
