@@ -1,93 +1,64 @@
+
 #!/bin/bash
-set -e
+set -Eeuo pipefail
 
-# Recommendations:
-# 1. Always test this script in a safe environment (e.g. a VM or container) before using it in production.
-# 2. Consider logging output for auditing.
-# 3. Ensure you have backups of any important data before running a rollback.
-# 4. Be aware that some rollback actions (e.g. removing Java) might affect other applications.
+# ============================================================
+# Armatherm ThingsBoard Installation / Upgrade
+# Ubuntu 24.04 - ThingsBoard CE - Java 25 - PostgreSQL
+# ============================================================
 
-# Global variables for credentials
 THINGSBOARD_USER=""
 THINGSBOARD_PASS=""
+LATEST_VERSION=""
+CONFIG_FILE="/etc/thingsboard/conf/thingsboard.conf"
 
-# Function: prompt the user if a step fails.
-prompt_continue() {
-    echo "An error occurred in the previous step."
-    while true; do
-        read -p "Do you want to (c)ontinue or (a)bort the installation? " choice
-        case "$choice" in
-            c|C ) echo "Continuing installation despite error."; break;;
-            a|A )
-                echo "Installation aborted."
-                read -p "Do you want to rollback previous changes? (y/n): " rollback_choice
-                if [[ "$rollback_choice" =~ ^[Yy]$ ]]; then
-                    rollback_installation
-                fi
-                exit 1
-                ;;
-            * ) echo "Please answer c or a.";;
-        esac
-    done
-}
+# ------------------------------------------------------------
+# Fehlerbehandlung
+# ------------------------------------------------------------
 
-# Function: rollback previous steps (this is a basic implementation)
-rollback_installation() {
-    echo "Rolling back installation steps..."
+trap 'echo "FEHLER in Zeile $LINENO. Installation abgebrochen."' ERR
 
-    # Stop Thingsboard service if running
-    sudo systemctl stop thingsboard 2>/dev/null || true
+# ------------------------------------------------------------
+# Step 0: Zugangsdaten
+# ------------------------------------------------------------
 
-    # Restore Thingsboard configuration if a backup exists.
-    if [ -f /etc/thingsboard/conf/thingsboard.conf.bak ]; then
-        sudo mv /etc/thingsboard/conf/thingsboard.conf.bak /etc/thingsboard/conf/thingsboard.conf
-        echo "Restored original Thingsboard configuration."
-    fi
+echo "Step 0: Please provide ThingsBoard credentials."
 
-    # Drop Thingsboard database and role.
-    sudo -u postgres psql -c "DROP DATABASE IF EXISTS thingsboard;"
-    sudo -u postgres psql -c "DROP ROLE IF EXISTS ${THINGSBOARD_USER};"
-
-    # Remove Thingsboard package.
-    sudo dpkg -r thingsboard 2>/dev/null || true
-
-    echo "Rollback completed."
-}
-
-# Step 0: Ask for credentials
-echo "Step 0: Please provide Thingsboard credentials."
-read -p "Enter Thingsboard username: " THINGSBOARD_USER
-read -s -p "Enter Thingsboard password: " THINGSBOARD_PASS
+read -r -p "Enter ThingsBoard username: " THINGSBOARD_USER
+read -r -s -p "Enter ThingsBoard password: " THINGSBOARD_PASS
 echo ""
 
-# Step 1: Install dependencies
+if [[ ! "$THINGSBOARD_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+    echo "ERROR: Invalid PostgreSQL username."
+    exit 1
+fi
+
+# ------------------------------------------------------------
+# Step 1: Required packages
+# ------------------------------------------------------------
+
 echo "Step 1: Installing required packages."
 
 sudo apt update
+sudo apt install -y curl wget python3
 
-sudo apt install -y curl wget
-if [ $? -ne 0 ]; then
-    prompt_continue
-fi
+# ------------------------------------------------------------
+# Step 2: Java 25
+# ------------------------------------------------------------
 
-# Step 2: Ensure Java 25 is installed
 echo "Step 2: Checking Java 25."
 
-if ! dpkg -s openjdk-25-jdk-headless &>/dev/null; then
-    sudo apt install -y openjdk-25-jdk-headless
+sudo apt install -y openjdk-25-jdk-headless
+
+JAVA_PATH="/usr/lib/jvm/java-25-openjdk-$(dpkg --print-architecture)/bin/java"
+
+if [ -x "$JAVA_PATH" ]; then
+    sudo update-alternatives --set java "$JAVA_PATH"
 fi
 
 JAVA_VERSION=$(java -version 2>&1 | head -n 1)
+
 echo "Detected Java: $JAVA_VERSION"
-
-if [[ "$JAVA_VERSION" != *"25"* ]]; then
-    echo "Java 25 is required. Configuring Java 25."
-
-    sudo update-alternatives --set java \
-        /usr/lib/jvm/java-25-openjdk-amd64/bin/java
-fi
-
-JAVA_VERSION=$(java -version 2>&1 | head -n 1)
 
 if [[ "$JAVA_VERSION" != *"25"* ]]; then
     echo "ERROR: Java 25 is not active."
@@ -96,106 +67,180 @@ fi
 
 echo "Java 25 is active."
 
+# ------------------------------------------------------------
+# Step 3: Detect latest ThingsBoard version
+# ------------------------------------------------------------
+
+echo "Step 3: Detecting latest ThingsBoard version."
+
+LATEST_VERSION=$(
+    curl -fsSL https://api.github.com/repos/thingsboard/thingsboard/releases/latest |
+    python3 -c 'import sys,json; print(json.load(sys.stdin)["tag_name"].lstrip("v"))'
+)
+
+if [[ -z "$LATEST_VERSION" ]]; then
+    echo "ERROR: ThingsBoard version could not be detected."
+    exit 1
+fi
+
 echo "Latest ThingsBoard version detected: $LATEST_VERSION"
 
-# Step 5: Download latest ThingsBoard package
-echo "Step 5: Downloading latest ThingsBoard package."
+# ------------------------------------------------------------
+# Step 4: Download ThingsBoard package
+# ------------------------------------------------------------
 
-wget https://github.com/thingsboard/thingsboard/releases/download/v${LATEST_VERSION}/thingsboard-${LATEST_VERSION}.deb
+echo "Step 4: Downloading ThingsBoard package."
 
-if [ $? -ne 0 ]; then
-    prompt_continue
+PACKAGE="thingsboard-${LATEST_VERSION}.deb"
+
+wget -O "$PACKAGE" \
+"https://github.com/thingsboard/thingsboard/releases/download/v${LATEST_VERSION}/${PACKAGE}"
+
+# ------------------------------------------------------------
+# Step 5: Backup existing database and configuration
+# ------------------------------------------------------------
+
+echo "Step 5: Creating backups."
+
+sudo mkdir -p /var/backups/thingsboard
+
+if sudo -u postgres psql -tAc \
+"SELECT 1 FROM pg_database WHERE datname='thingsboard'" |
+grep -q 1; then
+
+    BACKUP_FILE="/var/backups/thingsboard/thingsboard_$(date +%Y%m%d_%H%M%S).dump"
+
+    sudo -u postgres pg_dump -Fc thingsboard |
+    sudo tee "$BACKUP_FILE" >/dev/null
+
+    echo "Database backup created: $BACKUP_FILE"
+else
+    echo "No existing ThingsBoard database found."
 fi
 
+if sudo test -f "$CONFIG_FILE"; then
+    sudo cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+    echo "Configuration backup created."
+fi
+
+# ------------------------------------------------------------
 # Step 6: Install ThingsBoard package
+# ------------------------------------------------------------
+
 echo "Step 6: Installing ThingsBoard package."
 
-sudo dpkg -i thingsboard-${LATEST_VERSION}.deb
+sudo systemctl stop thingsboard 2>/dev/null || true
 
-if [ $? -ne 0 ]; then
-    prompt_continue
-else
-    echo "ThingsBoard package installed successfully."
-fi
+sudo dpkg -i "$PACKAGE" || {
+    sudo apt-get install -f -y
+    sudo dpkg -i "$PACKAGE"
+}
 
-sudo systemctl daemon-reload
+echo "ThingsBoard package installed successfully."
 
-# Step 7: Configure PostgreSQL database
+# ------------------------------------------------------------
+# Step 7: Configure PostgreSQL
+# ------------------------------------------------------------
+
 echo "Step 7: Configuring PostgreSQL database."
 
+sudo systemctl enable postgresql
 sudo systemctl start postgresql
 
-sudo -u postgres psql <<EOF
-CREATE ROLE ${THINGSBOARD_USER} WITH LOGIN PASSWORD '${THINGSBOARD_PASS}';
-CREATE DATABASE thingsboard WITH OWNER ${THINGSBOARD_USER};
-EOF
+# Escape single quotes in the password for SQL.
+SQL_PASSWORD=${THINGSBOARD_PASS//\'/\'\'}
 
-if [ $? -ne 0 ]; then
-    prompt_continue
+# Create role if absent; otherwise update its password.
+sudo -u postgres psql -v ON_ERROR_STOP=1 \
+    -c "DO \$\$ BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${THINGSBOARD_USER}') THEN
+            CREATE ROLE ${THINGSBOARD_USER} WITH LOGIN PASSWORD '${SQL_PASSWORD}';
+        ELSE
+            ALTER ROLE ${THINGSBOARD_USER} WITH LOGIN PASSWORD '${SQL_PASSWORD}';
+        END IF;
+    END \$\$;"
+
+# Create database only if it does not exist.
+if ! sudo -u postgres psql -tAc \
+"SELECT 1 FROM pg_database WHERE datname='thingsboard'" |
+grep -q 1; then
+
+    sudo -u postgres createdb \
+        -O "$THINGSBOARD_USER" thingsboard
+
+    echo "ThingsBoard database created."
 else
-    echo "Database and role created successfully."
+    echo "Existing ThingsBoard database preserved."
 fi
 
-# Step 8: Update ThingsBoard configuration
+# ------------------------------------------------------------
+# Step 8: Configure ThingsBoard
+# ------------------------------------------------------------
+
 echo "Step 8: Updating ThingsBoard configuration."
 
-CONFIG_FILE="/etc/thingsboard/conf/thingsboard.conf"
+sudo touch "$CONFIG_FILE"
 
-if [ -f "$CONFIG_FILE" ]; then
-    sudo cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
-    echo "Backup of configuration file saved as ${CONFIG_FILE}.bak."
-fi
+# Remove previous Armatherm configuration block.
+sudo sed -i \
+'/# BEGIN ARMATHERM THINGSBOARD CONFIG/,/# END ARMATHERM THINGSBOARD CONFIG/d' \
+"$CONFIG_FILE"
 
-sudo bash -c "cat >> $CONFIG_FILE" <<EOL
+sudo tee -a "$CONFIG_FILE" >/dev/null <<EOF
+
+# BEGIN ARMATHERM THINGSBOARD CONFIG
 
 # DB Configuration
 export DATABASE_TS_TYPE=sql
 export SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/thingsboard
 export SPRING_DATASOURCE_USERNAME=${THINGSBOARD_USER}
-export SPRING_DATASOURCE_PASSWORD=${THINGSBOARD_PASS}
+export SPRING_DATASOURCE_PASSWORD='${THINGSBOARD_PASS}'
 export SQL_POSTGRES_TS_KV_PARTITIONING=MONTHS
 
 # Server Port Configuration
 export HTTP_BIND_PORT=9090
 export MQTT_BIND_PORT=1882
-EOL
 
-if [ $? -ne 0 ]; then
-    prompt_continue
-else
-    echo "Configuration file updated successfully."
-fi
+# END ARMATHERM THINGSBOARD CONFIG
+EOF
 
-# Step 9: Run ThingsBoard installation script
+sudo chmod 600 "$CONFIG_FILE"
+
+echo "ThingsBoard configuration updated."
+
+# ------------------------------------------------------------
+# Step 9: Initialize / Upgrade database schema
+# ------------------------------------------------------------
+
 echo "Step 9: Running ThingsBoard installation script."
 
-cd /usr/share/thingsboard/bin/install/
+sudo /usr/share/thingsboard/bin/install/install.sh
 
-sudo ./install.sh
+echo "ThingsBoard database initialization completed."
 
-if [ $? -ne 0 ]; then
-    prompt_continue
-else
-    echo "Installation script executed successfully."
-fi
-
+# ------------------------------------------------------------
 # Step 10: Start ThingsBoard service
+# ------------------------------------------------------------
+
 echo "Step 10: Starting ThingsBoard service."
 
+sudo systemctl daemon-reload
 sudo systemctl enable thingsboard
 sudo systemctl restart thingsboard
 
-if [ $? -ne 0 ]; then
-    prompt_continue
-else
-    echo "ThingsBoard service started successfully."
-fi
+# ------------------------------------------------------------
+# Step 11: Check service status
+# ------------------------------------------------------------
 
-# Step 11: Show service status
-echo "Step 11: Checking service status."
+echo "Step 11: Checking ThingsBoard service."
+
+sleep 5
 
 sudo systemctl status thingsboard --no-pager
 
 echo ""
-echo "Installation completed successfully!"
-echo "Installed ThingsBoard version: $LATEST_VERSION"
+echo "============================================================"
+echo "ThingsBoard installation / upgrade completed."
+echo "Installed version: $LATEST_VERSION"
+echo "Web interface: http://192.168.2.10:9090"
+echo "============================================================"
